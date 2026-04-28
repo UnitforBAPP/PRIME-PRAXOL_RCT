@@ -1,0 +1,27 @@
+/* SHAPS_Total_diff */
+
+ 
+
+ods graphics on;
+
+proc mixed data=Endpoints_Restructured method=reml;
+
+class ResearchID Treatment Time;
+
+model SHAPS_Total_diff = Treatment Time Treatment*Time SHAPS_Total_w0 / solution residual;
+
+repeated Time/ subject=ResearchID type=un group=Treatment;
+
+lsmeans Treatment/ diff pdiff cl;
+
+lsmeans Treatment*Time/ diff pdiff cl;
+
+estimate 'Treatment Active-Placebo, Time 1' Treatment 1 -1 Treatment*Time 1 0 0 -1 0 0 / cl;
+
+estimate 'Treatment Active-Placebo, Time 2' Treatment 1 -1 Treatment*Time 0 1 0 0 -1 0 / cl;
+
+estimate 'Treatment Active-Placebo, Time 3' Treatment 1 -1 Treatment*Time 0 0 1 0 0 -1 / cl;
+
+run;
+
+ods graphics off;

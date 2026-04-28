@@ -1,0 +1,196 @@
+library(nlme)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(rstudioapi)
+library(emmeans)
+library(ggplot2)
+library(car)
+library(ggsignif)
+
+# Load Data wide-format
+file_path <- selectFile(
+  caption = "Select your clinical trial Excel file",
+  filter = "Excel Files (*.xlsx)",
+  path = getwd()
+)
+
+message("File selected:", file_path, "\n")
+
+data <- read_excel(file_path) %>%
+  mutate(
+    Placebo = factor(Placebo, levels = c(0, 1), labels = c("Pramipexole", "Placebo"))
+  )
+
+
+# Define Outcome Variables
+baseline_var <- "baseline"
+endpoint_var <- "endpoint"
+
+outcome_name <- "outcome"
+
+include_baseline_covariate <- FALSE
+
+
+# Creata dataframe in long-format
+data_long <- data %>%
+  dplyr::select(
+    ResearchID,
+    Placebo,
+    all_of(c(baseline_var, endpoint_var))
+  ) %>%
+  pivot_longer(
+    cols = all_of(c(baseline_var, endpoint_var)),
+    names_to  = "Time",
+    values_to = outcome_name
+  ) %>%
+  mutate(
+    Time = factor(
+      Time,
+      levels = c(baseline_var, endpoint_var),
+      labels = c("Baseline", "Endpoint")
+    )
+  )
+
+data_long_mmrm <- data_long %>%
+  mutate(
+    ResearchID = factor(ResearchID),
+    Placebo = dplyr::case_when(
+      is.numeric(Placebo) & Placebo == 0 ~ "Pramipexole",
+      is.numeric(Placebo) & Placebo == 1 ~ "Placebo",
+      as.character(Placebo) %in% c("0", "Pramipexole") ~ "Pramipexole",
+      as.character(Placebo) %in% c("1", "Placebo")     ~ "Placebo",
+      TRUE ~ NA_character_
+    ),
+    Placebo = factor(Placebo, levels = c("Placebo", "Pramipexole")),
+    Time = factor(Time, levels = c("Baseline", "Endpoint"))
+  ) %>%
+  droplevels()
+
+
+# Create Baseline covariate
+baseline_values <- data_long %>%
+  filter(Time == "Baseline") %>%
+  dplyr::select(
+    ResearchID,
+    Baseline_value = !!sym(outcome_name)
+  )
+data_long_mmrm <- data_long_mmrm %>%
+  left_join(baseline_values, by = "ResearchID")
+
+
+# MMRM
+if (include_baseline_covariate) {
+  model_formula <- as.formula(
+    paste0(outcome_name, " ~ Baseline_value + Placebo * Time")
+  )
+} else {
+  model_formula <- as.formula(
+    paste0(outcome_name, " ~ Placebo * Time")
+  )
+}
+
+mmrm <- gls(
+  model_formula,
+  data = data_long_mmrm,
+  correlation = corSymm(form = ~ as.numeric(Time) | ResearchID),
+  method = "REML",
+  na.action = na.exclude
+)
+
+
+# Model summary and contrasts
+desc_stats <- data_long %>%
+  group_by(Placebo, Time) %>%
+  summarise(
+    N    = sum(!is.na(.data[[outcome_name]])),
+    Mean = mean(.data[[outcome_name]], na.rm = TRUE),
+    SD   = sd(.data[[outcome_name]], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+options(pillar.sigfig = 5)
+desc_stats
+
+#summary(mmrm)
+
+car::Anova(mmrm, type = 3)
+
+emm_by_time  <- emmeans(mmrm, ~ Placebo | Time)
+pairs(emm_by_time)
+
+
+message(
+  if (include_baseline_covariate)
+    "MMRM includes baseline covariate"
+  else
+    "MMRM WITHOUT baseline covariate"
+)
+
+
+#Normality of Residuals
+resid_all <- residuals(mmrm, type = "normalized")
+fitted_all <- fitted(mmrm)
+
+diag_df <- data_long_mmrm %>%
+  mutate(
+    resid = resid_all,
+    fitted = fitted_all
+  )
+
+qqnorm(diag_df$resid)
+qqline(diag_df$resid, col = "red")
+#Severe S‑shaping or extreme points suggest issues
+
+ggplot(diag_df, aes(resid)) +
+  geom_histogram(bins = 30, color = "black", fill = "grey70") +
+  labs(title = "Histogram of normalized residuals")
+
+shapiro.test(diag_df$resid)
+
+#Endpoint residuals
+diag_endpoint <- diag_df %>%
+  filter(Time == "Endpoint")
+
+qqnorm(diag_endpoint$resid)
+qqline(diag_endpoint$resid, col = "red")
+
+ggplot(diag_endpoint, aes(resid)) +
+  geom_histogram(bins = 20, color = "black", fill = "skyblue") +
+  labs(title = "Endpoint residuals")
+
+shapiro.test(diag_endpoint$resid)
+
+
+# Plot of estimates
+
+emm_df <- as.data.frame(emm_by_time)
+color_map <- c("Placebo"     = "#000000",  "Pramipexole" = "#8B008B")
+
+ggplot(emm_df, aes(x = Time, y = emmean, fill = Placebo)) +
+  geom_bar(stat = "identity",
+           position = position_dodge(width = 0.5),  # controls spacing between groups
+           color = "black", alpha = 0.8, width = 0.4) +  # controls bar thickness
+  geom_errorbar(aes(ymin = emmean, ymax = emmean + SE),
+                width = 0.15, position = position_dodge(width = 0.5)) +
+  scale_fill_manual(values = color_map) +
+  scale_color_manual(values = color_map) +
+  scale_y_continuous(expand = c(0, 0)) +
+  expand_limits(y = 0) +  
+  guides(fill = guide_legend(title = NULL)) +
+  ylab(paste0("Estimates: ", outcome_name)) +  
+  xlab("") +  
+  coord_cartesian(clip = "off") + 
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position    = "top",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "gray90"),
+    panel.grid.minor.y = element_line(color = "gray95"),
+    axis.line          = element_line(color = "black", linewidth = 1.1),
+    axis.ticks         = element_line(color = "black", linewidth = 1.0),
+    axis.text          = element_text(color = "black", size = 12),
+    axis.title         = element_text(color = "black", size = 16)
+  )
+  
